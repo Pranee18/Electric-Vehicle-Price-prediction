@@ -1,0 +1,143 @@
+library(tidyverse)
+library(caret)
+library(randomForest)
+library(Metrics)
+library(gbm)
+library(data.table)
+library(class)
+library(ggplot2)
+library(stats)
+library(FNN)
+
+# Load your data
+vehicle_data <- read.csv("C:/Users/prane/OneDrive/Desktop/B.Tech Semesters/SEM 5/miniprojects/prob&statistics/ElectricCarData_Norm.csv")
+
+# Data Cleaning and Preprocessing
+clean_numeric_column <- function(column) {
+  column <- gsub(",", "", column)
+  column <- as.numeric(gsub("[^0-9eE.-]", "", column))
+  return(column)
+}
+
+numeric_cols <- c("Accel", "TopSpeed", "Range", "Efficiency", "FastCharge")
+vehicle_data[numeric_cols] <- lapply(vehicle_data[numeric_cols], clean_numeric_column)
+
+# Handle Missing Values (using median)
+vehicle_data[numeric_cols] <- lapply(vehicle_data[numeric_cols], function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x))
+
+# Handle Outliers (capping at 99th percentile)
+cap_outliers <- function(column) {
+  quantile_99 <- quantile(column, 0.99, na.rm = TRUE)
+  ifelse(column > quantile_99, quantile_99, column)
+}
+
+vehicle_data[numeric_cols] <- lapply(vehicle_data[numeric_cols], cap_outliers)
+
+# Feature Scaling (Standardization)
+scale_column <- function(column) {
+  (column - mean(column, na.rm = TRUE)) / sd(column, na.rm = TRUE)
+}
+
+vehicle_data[numeric_cols] <- lapply(vehicle_data[numeric_cols], scale_column)
+
+# Correlation Analysis
+correlation_matrix <- cor(vehicle_data[numeric_cols], use = "complete.obs")
+print(correlation_matrix)
+
+# Train-test split
+set.seed(123)
+train_index <- createDataPartition(vehicle_data$PriceEuro, p = 0.8, list = FALSE)
+train_data <- vehicle_data[train_index, ]
+test_data <- vehicle_data[-train_index, ]
+
+# Encoding non-numeric features
+for (col in names(train_data)) {
+  if (!is.numeric(train_data[[col]])) {
+    combined_levels <- unique(c(train_data[[col]], test_data[[col]]))
+    train_data[[col]] <- factor(train_data[[col]], levels = combined_levels)
+    test_data[[col]] <- factor(test_data[[col]], levels = combined_levels)
+    train_data[[col]] <- as.numeric(train_data[[col]])
+    test_data[[col]] <- as.numeric(test_data[[col]])
+  }
+}
+
+# Function to evaluate models
+evaluate_model <- function(actual, predicted) {
+  rmse <- sqrt(mean((actual - predicted)^2))
+  rsq <- 1 - (sum((actual - predicted)^2) / sum((actual - mean(actual))^2))
+  return(list(RMSE = rmse, R_squared = rsq))
+}
+
+# Define training and testing sets
+y_train <- train_data$PriceEuro
+X_train <- train_data[, setdiff(names(train_data), "PriceEuro")]
+y_test <- test_data$PriceEuro
+X_test <- test_data[, setdiff(names(test_data), "PriceEuro")]
+
+# Linear Regression
+lm_model <- lm(PriceEuro ~ ., data = train_data)
+predictions_lm <- predict(lm_model, newdata = X_test)
+metrics_lm <- evaluate_model(y_test, predictions_lm)
+mape <- mean(abs((y_test - predictions_lm) / (y_test + 1e-9))) * 100
+accuracy1 <- 100 - mape
+metrics_lm
+cat(sprintf("Regression Accuracy: %.2f%%\n", accuracy1))
+
+# GBM Model
+gbm_model <- gbm(PriceEuro ~ ., data = train_data, distribution = "gaussian", n.trees = 100, interaction.depth = 3, shrinkage = 0.1)
+predictions_gbm <- predict(gbm_model, newdata = X_test, n.trees = 100)
+metrics_gbm <- evaluate_model(y_test, predictions_gbm)
+mape <- mean(abs((y_test - predictions_gbm) / (y_test + 1e-9))) * 100
+accuracy2 <- 100 - mape
+metrics_gbm
+cat(sprintf("GBM Accuracy: %.2f%%\n", accuracy2))
+
+# Random Forest Model
+rf_model <- randomForest(PriceEuro ~ ., data = train_data, ntree = 100)
+predictions_rf <- predict(rf_model, newdata = X_test)
+metrics_rf <- evaluate_model(y_test, predictions_rf)
+mape <- mean(abs((y_test - predictions_rf) / (y_test + 1e-9))) * 100
+accuracy3 <- 100 - mape
+metrics_rf
+cat(sprintf("RF Accuracy: %.2f%%\n", accuracy3))
+
+k_value <- 5
+knn_model <- knn.reg(train = X_train, test = X_test, y = y_train, k = k_value)
+predicted_prices_knn <- knn_model$pred  # Extract predicted values
+metrics_knn <- evaluate_model(y_test, predicted_prices_knn)
+# MAPE Calculation
+mape <- mean(abs((y_test - predicted_prices_knn) / (y_test + 1e-9))) * 100
+accuracy4 <- 100 - mape
+# Print Results
+metrics_knn
+cat(sprintf("KNN Accuracy: %.2f%%\n", accuracy4))
+
+# Store all models' performance metrics
+model_metrics <- data.frame(
+  Model = c("Linear Regression", "GBM", "Random Forest", "KNN"),
+  RMSE = c(metrics_lm$RMSE, metrics_gbm$RMSE, metrics_rf$RMSE, metrics_knn$RMSE),
+  R_squared = c(metrics_lm$R_squared, metrics_gbm$R_squared, metrics_rf$R_squared, metrics_knn$R_squared),
+  Accuracy = c(accuracy1, accuracy2, accuracy3, accuracy4)
+)
+
+print(model_metrics)
+
+# Bar plots
+rmse_plot <- ggplot(model_metrics, aes(x = Model, y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Model Comparison - RMSE", x = "Model", y = "RMSE") +
+  theme_minimal() +
+  theme(legend.position = "none")
+print(rmse_plot)
+
+rsquared_plot <- ggplot(model_metrics, aes(x = Model, y = R_squared, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Model Comparison - R-squared", x = "Model", y = "R-squared") +
+  theme_minimal() +
+  theme(legend.position = "none")
+print(rsquared_plot)
+
+# Best Model Selection
+best_model_index <- which.min(model_metrics$RMSE)
+best_model <- model_metrics[best_model_index, ]
+cat(paste("The best model is:", best_model$Model, "with RMSE value as", best_model$RMSE, "and R-squared value as", best_model$R_squared, "\n"))
